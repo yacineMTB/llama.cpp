@@ -24,13 +24,13 @@ Napi::Number init(const Napi::CallbackInfo &info)
   std::string model = modelNapi.Utf8Value();
   Napi::Env env = info.Env();
   llama_init_backend();
-  params = *g_params;
-  params.model = model;
+  g_params = new gpt_params;
+  g_params->model = model;
   // load the model and apply lora adapter, if any
   // TODO: Create a function that "swaps" the adapter
   // TODO: Create a function that holds more than one adapter in memory
-  g_ctx = llama_init_from_gpt_params(params);
-  fprintf(stderr, "system_info: n_threads = %d / %d | %s\n", params.n_threads, std::thread::hardware_concurrency(), llama_print_system_info());
+  g_ctx = llama_init_from_gpt_params(*g_params);
+  fprintf(stderr, "system_info: n_threads = %d / %d | %s\n", g_params->n_threads, std::thread::hardware_concurrency(), llama_print_system_info());
   if (g_ctx == NULL)
   {
     fprintf(stderr, "%s: error: unable to load model\n", __func__);
@@ -46,7 +46,7 @@ std::mutex worker_mutex;
 class InferenceWorker {
 public:
   InferenceWorker(Napi::Env env, Napi::Function listener, std::string prompt)
-    : callback(Napi::ThreadSafeFunction::New(
+    : listener(Napi::ThreadSafeFunction::New(
           env,
           listener,  // JavaScript function called asynchronously
           "LLaMa Inference Callback",  // Name
