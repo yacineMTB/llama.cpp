@@ -28,6 +28,8 @@ target_link_libraries(${TARGET} PRIVATE llama)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 
 if (EMSCRIPTEN)
+elseif(CMAKE_JS_VERSION)
+    add_subdirectory(addon.node)
 else()
     add_subdirectory(main)
     add_subdirectory(quantize)
