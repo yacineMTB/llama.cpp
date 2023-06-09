@@ -10,9 +10,9 @@
 #include <cstdint>
 
 static console_state con_st;
-// Pointer to llama_context
-// g_ctx is meant to point to a heap-allocated llama_context 
+
 static llama_context *g_ctx;
+static gpt_params *g_params;
 
 // Initialization function
 // Instantiates a global context, and loads the model
@@ -22,19 +22,15 @@ Napi::Number init(const Napi::CallbackInfo &info)
   Napi::Object obj = info[0].As<Napi::Object>();
   Napi::String modelNapi = obj.Get("model").As<Napi::String>();
   std::string model = modelNapi.Utf8Value();
-  Napi::String promptNapi = obj.Get("prompt").As<Napi::String>();
-  std::string prompt = promptNapi.Utf8Value();
   Napi::Env env = info.Env();
-
   llama_init_backend();
-  gpt_params params;
+  params = *g_params;
   params.model = model;
-  params.prompt = prompt;
   // load the model and apply lora adapter, if any
   // TODO: Create a function that "swaps" the adapter
   // TODO: Create a function that holds more than one adapter in memory
   g_ctx = llama_init_from_gpt_params(params);
-
+  fprintf(stderr, "system_info: n_threads = %d / %d | %s\n", params.n_threads, std::thread::hardware_concurrency(), llama_print_system_info());
   if (g_ctx == NULL)
   {
     fprintf(stderr, "%s: error: unable to load model\n", __func__);
@@ -49,25 +45,23 @@ std::mutex worker_mutex;
 
 class InferenceWorker {
 public:
-  InferenceWorker(Napi::Env env, Napi::Function callback, std::string model, std::string prompt)
+  InferenceWorker(Napi::Env env, Napi::Function listener, std::string prompt)
     : callback(Napi::ThreadSafeFunction::New(
           env,
-          callback,  // JavaScript function called asynchronously
+          listener,  // JavaScript function called asynchronously
           "LLaMa Inference Callback",  // Name
           0,  // Unlimited queue
           1,  // Only one thread will use this initially
           [this](Napi::Env) {  // Finalizer used to clean threads up
             nativeThread.join();
           })),
-      nativeThread([this, model, prompt] {
-        gpt_params params;
-        params.model = model;
-        params.prompt = prompt;
+      nativeThread([this, prompt] {
+        gpt_params params = *g_params;
         llama_context* ctx = g_ctx;
+        params.prompt = prompt;
 
-        fprintf(stderr, "system_info: n_threads = %d / %d | %s\n", params.n_threads, std::thread::hardware_concurrency(), llama_print_system_info());
         std::vector<llama_token> embd_inp;
-        // Llama implementation lurk
+        // FB tokenizer implementation lurk
         params.prompt.insert(0, 1, ' ');
         embd_inp = ::llama_tokenize(ctx, params.prompt, true);
 
@@ -219,24 +213,24 @@ public:
           for (auto id : embd)
           {
             const char* tokenStr = llama_token_to_str(ctx, id);
-            this->callback.NonBlockingCall([tokenStr](Napi::Env env, Napi::Function jsCallback) {
+            this->listener.NonBlockingCall([tokenStr](Napi::Env env, Napi::Function jsCallback) {
               jsCallback.Call({ Napi::String::New(env, tokenStr) });
             });
           }
           // end of text token
           if (!embd.empty() && embd.back() == llama_token_eos())
           {
-            this->callback.NonBlockingCall([](Napi::Env env, Napi::Function jsCallback) {
+            this->listener.NonBlockingCall([](Napi::Env env, Napi::Function jsCallback) {
               jsCallback.Call({ Napi::String::New(env, "[end of text]") });
             });
             break;
           }
         }
         worker_mutex.unlock();
-        this->callback.Release();
+        this->listener.Release();
       }) {}
 private:
-  Napi::ThreadSafeFunction callback;
+  Napi::ThreadSafeFunction listener;
   std::thread nativeThread;
 };
 
@@ -244,8 +238,7 @@ InferenceWorker* global_worker;
 Napi::Value StartAsync(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
   Napi::Object options = info[0].As<Napi::Object>();
-  Napi::Function callback = options.Get("callback").As<Napi::Function>();
-  std::string model = options.Get("model").ToString();
+  Napi::Function listener = options.Get("listener").As<Napi::Function>();
   std::string prompt = options.Get("prompt").ToString();
 
   // Already a worker running
@@ -255,7 +248,7 @@ Napi::Value StartAsync(const Napi::CallbackInfo& info) {
 
   delete global_worker;
   global_worker = nullptr;
-  global_worker = new InferenceWorker(env, callback, model, prompt);
+  global_worker = new InferenceWorker(env, listener, prompt);
 
   return Napi::Boolean::New(env, true);
 }
