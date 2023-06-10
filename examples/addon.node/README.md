@@ -17,6 +17,11 @@ Make sure it is in the project root directory and compiled with make-js.
 npx cmake-js compile -T llama-addon -B Release
 ```
 
+Passing options
+```shell
+npx cmake-js compile --CDLLAMA_CUBLAS="ON" -T llama-addon -B Release
+```
+
 ## Run
 
 ```shell
