@@ -31,6 +31,12 @@ else()
     endif()
 endif()
 
+# I don't know what i'm doing, and this is the first time I've seen a make that makes a make
+# HIt me with a stick, I needed to do this to make it work on my x86 linux box
+if(CMAKE_JS_VERSION)
+    set(BUILD_SHARED_LIBS ON)
+endif()
+
 
 #
 # Option list
