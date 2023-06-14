@@ -22,11 +22,15 @@ Napi::Number init(const Napi::CallbackInfo &info)
   Napi::Object obj = info[0].As<Napi::Object>();
   Napi::String modelNapi = obj.Get("model").As<Napi::String>();
   std::string model = modelNapi.Utf8Value();
+
   Napi::Env env = info.Env();
   llama_init_backend();
   g_params = new gpt_params;
   g_params->model = model;
+  
+  g_params->n_ctx = 1024;
   // load the model and apply lora adapter, if any
+  // TODO: Create a function that "swaps" the adapter
   // TODO: Create a function that holds more than one adapter in memory
   if (obj.Has("lora")) {
     Napi::String loraNapi = obj.Get("lora").As<Napi::String>();
@@ -51,7 +55,6 @@ Napi::Number init(const Napi::CallbackInfo &info)
 
 std::mutex worker_mutex;
 
-// Function to load adapter at runtime
 Napi::Number swapLora(const Napi::CallbackInfo &info)
 {
   Napi::Object obj = info[0].As<Napi::Object>();
@@ -61,10 +64,14 @@ Napi::Number swapLora(const Napi::CallbackInfo &info)
   fprintf(stderr, "Acquiring lock\n");
   worker_mutex.lock();
 
-  fprintf(stderr, "Swapping lora from Path: %s\n", lora.c_str());
+  fprintf(stderr, "Removing lora from Path: %s\n", lora.c_str());
+  llama_remove_lora_from_file(g_ctx, lora.c_str(), NULL, get_num_physical_cores());
+
+  fprintf(stderr, "Loading lora from Path: %s\n", lora.c_str());
   llama_apply_lora_from_file(g_ctx, lora.c_str(), NULL, get_num_physical_cores());
 
   worker_mutex.unlock();
+  fprintf(stderr, "Releasing lock\n");
   return Napi::Number::New(info.Env(), 0);  
 }
 

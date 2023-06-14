@@ -115,16 +115,7 @@ extern "C" {
         LLAMA_FTYPE_MOSTLY_Q6_K          = 18,// except 1d tensors
     };
 
-    // model quantization parameters
-    typedef struct llama_model_quantize_params {
-        int nthread;                 // number of threads to use for quantizing, if <=0 will use std::thread::hardware_concurrency()
-        enum llama_ftype   ftype;    // quantize to this llama_ftype
-        bool allow_requantize;       // allow quantizing non-f32/f16 tensors
-        bool quantize_output_tensor; // quantize output.weight
-    } llama_model_quantize_params;
-
     LLAMA_API struct llama_context_params llama_context_default_params();
-    LLAMA_API struct llama_model_quantize_params llama_model_quantize_default_params();
 
     LLAMA_API bool llama_mmap_supported();
     LLAMA_API bool llama_mlock_supported();
@@ -146,11 +137,14 @@ extern "C" {
     // Frees all allocated memory
     LLAMA_API void llama_free(struct llama_context * ctx);
 
+    // TODO: not great API - very likely to change
     // Returns 0 on success
+    // nthread - how many threads to use. If <=0, will use std::thread::hardware_concurrency(), else the number given
     LLAMA_API int llama_model_quantize(
             const char * fname_inp,
             const char * fname_out,
-            const llama_model_quantize_params * params);
+      enum llama_ftype   ftype,
+            int          nthread);
 
     // Apply a LoRA adapter to a loaded model
     // path_base_model is the path to a higher quality model to use as a base for
@@ -163,6 +157,13 @@ extern "C" {
                       const char * path_lora,
                       const char * path_base_model,
                              int   n_threads);
+
+    // Remove a LoRA adapter from a loaded model
+    LLAMA_API int llama_remove_lora_from_file(
+                struct llama_context * ctx,
+                        const char * path_lora,
+                        const char * path_base_model,
+                                int   n_threads);
 
     // Returns the number of tokens in the KV cache
     LLAMA_API int llama_get_kv_cache_token_count(const struct llama_context * ctx);

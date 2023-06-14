@@ -596,6 +596,11 @@ extern "C" {
             struct ggml_context * ctx,
             struct ggml_tensor  * a,
             struct ggml_tensor  * b);
+    
+        GGML_API struct ggml_tensor * ggml_sub_inplace(
+                struct ggml_context * ctx,
+                struct ggml_tensor  * a,
+                struct ggml_tensor  * b);
 
     GGML_API struct ggml_tensor * ggml_mul(
             struct ggml_context * ctx,
