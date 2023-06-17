@@ -11,6 +11,9 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <cstring>
+#include <string>
+#include <unordered_map>
 
 #ifdef LLAMA_SHARED
 #    if defined(_WIN32) && !defined(__MINGW32__)
@@ -164,6 +167,24 @@ extern "C" {
                       const char * path_lora,
                       const char * path_base_model,
                              int   n_threads);
+    
+    LLAMA_API int llama_remove_lora_from_file(
+        struct llama_context * ctx,
+                    const char * path_lora,
+                    const char * path_base_model,
+                            int   n_threads);
+    
+    LLAMA_API int llama_apply_lora_from_cache(
+        struct llama_context * ctx,
+                    std::unordered_map< std::string, ggml_tensor* > lora_cache,
+                    const char * path_base_model,
+                            int   n_threads);
+    
+    LLAMA_API int llama_remove_lora_from_cache(
+        struct llama_context * ctx,
+                    std::unordered_map< std::string, ggml_tensor* > lora_cache,
+                    const char * path_base_model,
+                            int   n_threads);
 
     // Returns the number of tokens in the KV cache
     LLAMA_API int llama_get_kv_cache_token_count(const struct llama_context * ctx);
