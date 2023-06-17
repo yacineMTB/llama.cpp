@@ -2893,6 +2893,7 @@ int llama_apply_lora_from_cache_internal(struct llama_context * ctx, std::unorde
     bool warned = false;
     int n_tensors = 0;
 
+    //TODO: Fix this to process loraA and loraB seperately
     for (auto it = lora_tensors.begin(); it != lora_tensors.end(); ++it) {
         const std::string& base_name = it->first;
         struct std::vector<float> BA_vector = it->second;
@@ -3212,19 +3213,19 @@ int llama_apply_lora_from_file_internal(struct llama_context * ctx, const char *
             gf.n_threads = n_threads;
             ggml_graph_compute(lora_ctx, &gf);
 
+            //TODO: Should use a lora_cache struct where we can also store matrix dimensions & other metadata that are required for calculations once load
             if (!deactivate_adapter) {
-                const int64_t t_copy_lora_us = ggml_time_us();
-
                 // The copying poses a runtime cost though, might need to find a faster way to do this, some kind of cache warmup at the time of process restart
-                float* BA_data = (float *) BA->data; // can do this cause BA is guaranteed to be F32 for now
+                float* loraA_data = (float *) loraA->data; // can do this cause lora is guaranteed to be F32 for now
                 
-                std::vector<float> BA_data_copy(BA_data, BA_data + ggml_nelements(BA));
-                ctx->adapter_weights[base_name] = BA_data_copy;
+                std::vector<float> loraA_data_copy(loraA_data, loraA_data + ggml_nelements(loraA));
+                ctx->adapter_weights[base_name + ".loraA"] = loraA_data_copy;
 
-                const int64_t t_copy_lora_us_end = ggml_time_us();
-
-                fprintf(stderr, "%s: copied lora tensor '%s' in %.2f ms\n", __func__, base_name.c_str(), (t_copy_lora_us_end - t_copy_lora_us) / 1000.0);
+                float* loraB_data = (float *) loraB->data; // can do this cause lora is guaranteed to be F32 for now
+                std::vector<float> loraB_data_copy(loraB_data, loraB_data + ggml_nelements(loraB));
+                ctx->adapter_weights[base_name + ".loraB"] = loraB_data_copy;
             }
+
             // we won't need these tensors again, reset the context to save memory
             ggml_free(lora_ctx);
             lora_ctx = ggml_init(params);
