@@ -176,13 +176,13 @@ extern "C" {
     
     LLAMA_API int llama_apply_lora_from_cache(
         struct llama_context * ctx,
-                    std::unordered_map< std::string, ggml_tensor* > lora_cache,
+                    const char * path_lora,
                     const char * path_base_model,
                             int   n_threads);
     
     LLAMA_API int llama_remove_lora_from_cache(
         struct llama_context * ctx,
-                    std::unordered_map< std::string, ggml_tensor* > lora_cache,
+                    const char * path_lora,
                     const char * path_base_model,
                             int   n_threads);
 

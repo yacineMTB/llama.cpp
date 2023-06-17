@@ -62,10 +62,10 @@ Napi::Number swapLora(const Napi::CallbackInfo &info)
   worker_mutex.lock();
 
   fprintf(stderr, "Removing lora from Path: %s\n", lora.c_str());
-  llama_remove_lora_from_file(g_ctx, lora.c_str(), NULL, get_num_physical_cores());
+  llama_remove_lora_from_cache(g_ctx, lora.c_str(), NULL, get_num_physical_cores());
 
   fprintf(stderr, "Applying lora from Path: %s\n", lora.c_str());
-  llama_apply_lora_from_file(g_ctx, lora.c_str(), NULL, get_num_physical_cores());
+  llama_apply_lora_from_cache(g_ctx, lora.c_str(), NULL, get_num_physical_cores());
 
   worker_mutex.unlock();
   return Napi::Number::New(info.Env(), 0);  

@@ -249,6 +249,26 @@ struct llama_vocab {
     std::vector<token_score> id_to_token;
 };
 
+struct lora_metadata {
+    std::string name;
+    int64_t ne[2];
+    ggml_type type;
+};
+
+// TODO: move outside llama to addon.cpp for easy merge in the future
+// contains layer name to weight mapping
+struct lora_adapter_weights_map {
+    int32_t lora_alpha;
+    int32_t lora_r;
+    float scaling;
+
+    std::unordered_map<std::string, lora_metadata*> lora_metadata_map;
+    std::unordered_map<std::string, std::vector<float> > loraA_weights;
+    std::unordered_map<std::string, std::vector<float> > loraB_weights; 
+    // strings are being kept thrice, mem usage can be reduced further using a single map
+};
+
+
 struct llama_context {
     std::mt19937 rng;
 
@@ -282,11 +302,10 @@ struct llama_context {
     llama_ctx_buffer buf_scratch[LLAMA_MAX_SCRATCH_BUFFERS];
 
     // cache lora adapter weights, specifically s*BA matmul
-    // key -> base model layer name, value -> s*BA
-    // directly caching the matmul to avoid calculations at runtime
-    // for now only caches the last loaded adapter weights and assumes they'll be overwritten by next call
+    // key -> lora model path
     // TODO: Free these weights on deconstructor
-    std::unordered_map<std::string, std::vector<float>> adapter_weights;  
+    std::unordered_map<std::string, lora_adapter_weights_map* > lora_cache;
+
 
 #ifdef GGML_USE_METAL
     ggml_metal_context * ctx_metal = NULL;
@@ -2824,23 +2843,23 @@ int llama_model_quantize(
 }
 
 // Set `deactivate_adapter` to true if you want to remove the adapter from the model.
-int llama_apply_lora_from_cache_internal(struct llama_context * ctx, std::unordered_map<std::string, ggml_tensor*>& cached_tensors, const char * path_base_model, int n_threads, const bool deactivate_adapter) {
+int llama_apply_lora_from_cache_internal(struct llama_context * ctx, const char * lora_path, const char * path_base_model, int n_threads, const bool deactivate_adapter) {
     if (deactivate_adapter) {
-        fprintf(stderr, "%s: deactivating lora adapter - please wait ...\n", __func__);
+        fprintf(stderr, "%s: deactivating lora adapter from cache - please wait ...\n", __func__);
     } else {
-        fprintf(stderr, "%s: applying lora adapter - please wait ...\n", __func__);
+        fprintf(stderr, "%s: applying lora adapter from cache - please wait ...\n", __func__);
     }
 
     auto & model = ctx->model;
 
     //std::unordered_map<std::string, vector<float>> lora_tensors = cached_tensors.size() == 0 ? ctx->adapter_weights : cached_tensors;
 
-    std::unordered_map<std::string, std::vector<float>> lora_tensors = ctx->adapter_weights;
-
-    if (lora_tensors.size() == 0) {
-        fprintf(stderr, "%s: no tensors to apply\n", __func__);
-        return 0;
+    if (ctx->lora_cache.find(lora_path) == ctx->lora_cache.end()) {
+        fprintf(stderr, "%s: error: cached lora '%s' not found\n", __func__, lora_path);
+        return 1;
     }
+    
+    lora_adapter_weights_map* cached_lora_adapter = ctx->lora_cache[lora_path];
 
     const int64_t t_start_lora_us = ggml_time_us();
 
@@ -2893,12 +2912,22 @@ int llama_apply_lora_from_cache_internal(struct llama_context * ctx, std::unorde
     bool warned = false;
     int n_tensors = 0;
 
+    float scaling = cached_lora_adapter->scaling;
+
     //TODO: Fix this to process loraA and loraB seperately
-    for (auto it = lora_tensors.begin(); it != lora_tensors.end(); ++it) {
+    for (auto it = cached_lora_adapter->lora_metadata_map.begin(); it != cached_lora_adapter->lora_metadata_map.end(); ++it) {
         const std::string& base_name = it->first;
-        struct std::vector<float> BA_vector = it->second;
-        ggml_tensor* BA = ggml_new_tensor_2d(lora_ctx, GGML_TYPE_F32, BA_vector.size() / 4096, 4096);
-        BA->data = (float*) BA_vector.data();
+        const lora_metadata* metadata = it->second;
+        std::vector<float> loraA_vec = cached_lora_adapter->loraA_weights[base_name];
+        std::vector<float> loraB_vec = cached_lora_adapter->loraB_weights[base_name];
+        int ne0 = metadata->ne[0];
+        int ne1 = metadata->ne[1];
+
+        ggml_tensor* loraA = ggml_new_tensor_2d(lora_ctx, GGML_TYPE_F32, ne0, ne1); // for now it's fine since lora calculations are always in F32
+        ggml_tensor* loraB = ggml_new_tensor_2d(lora_ctx, GGML_TYPE_F32, ne0, ne1);
+
+        loraA->data = (float*) loraA_vec.data();
+        loraB->data = (float*) loraB_vec.data();
 
         // check if we have both A and B tensors and apply
         if (model_tensors.find(base_name) == model_tensors.end()) {
@@ -2933,6 +2962,15 @@ int llama_apply_lora_from_cache_internal(struct llama_context * ctx, std::unorde
             }
         }
 
+        // BA*s
+        ggml_tensor * BA = ggml_mul_mat(lora_ctx, loraA, loraB);
+
+        if (scaling != 1.0f) {
+            ggml_tensor * scale_tensor = ggml_new_f32(lora_ctx, scaling);
+            BA = ggml_scale_inplace(lora_ctx, BA, scale_tensor);
+        }
+
+        
         // w = w - BAs to unload the model
         // this has an obvious flaw that you need to pass exactly the same adapter weights with same layer names to unload the model
         // obvious improvement would be just caching the weights on load and using them on unload
@@ -2953,6 +2991,14 @@ int llama_apply_lora_from_cache_internal(struct llama_context * ctx, std::unorde
         gf.n_threads = n_threads;
         ggml_graph_compute(lora_ctx, &gf);
 
+        if (base_name == "layers.0.attention.wk.weight") {
+            std::string print_metadata = "Applying lora from cache";
+            if (deactivate_adapter) {
+                print_metadata = "Deactivating lora from cache";
+            }
+            print_ggml_float_tensor(dest_t, "layers.0.attention.wk.weight", print_metadata, 10);
+        
+        }
     
         // we won't need these tensors again, reset the context to save memory
         ggml_free(lora_ctx);
@@ -3072,6 +3118,11 @@ int llama_apply_lora_from_file_internal(struct llama_context * ctx, const char *
     // read tensors and apply
     bool warned = false;
     int n_tensors = 0;
+
+    lora_adapter_weights_map* lora_adapter_weights = new lora_adapter_weights_map();
+    lora_adapter_weights->lora_alpha = lora_alpha;
+    lora_adapter_weights->lora_r = lora_r;
+    lora_adapter_weights->scaling = scaling;
 
     while (true) {
         int32_t n_dims;
@@ -3213,17 +3264,23 @@ int llama_apply_lora_from_file_internal(struct llama_context * ctx, const char *
             gf.n_threads = n_threads;
             ggml_graph_compute(lora_ctx, &gf);
 
-            //TODO: Should use a lora_cache struct where we can also store matrix dimensions & other metadata that are required for calculations once load
             if (!deactivate_adapter) {
                 // The copying poses a runtime cost though, might need to find a faster way to do this, some kind of cache warmup at the time of process restart
-                float* loraA_data = (float *) loraA->data; // can do this cause lora is guaranteed to be F32 for now
                 
+                float* loraA_data = (float *) loraA->data; // can do this cause lora is guaranteed to be F32 for now
                 std::vector<float> loraA_data_copy(loraA_data, loraA_data + ggml_nelements(loraA));
-                ctx->adapter_weights[base_name + ".loraA"] = loraA_data_copy;
 
                 float* loraB_data = (float *) loraB->data; // can do this cause lora is guaranteed to be F32 for now
                 std::vector<float> loraB_data_copy(loraB_data, loraB_data + ggml_nelements(loraB));
-                ctx->adapter_weights[base_name + ".loraB"] = loraB_data_copy;
+
+                lora_metadata* lora_layer_metadata = new lora_metadata();
+                lora_layer_metadata->ne[0] = loraA->ne[0];
+                lora_layer_metadata->ne[1] = loraA->ne[1];
+                lora_layer_metadata->type = loraA->type;
+
+                lora_adapter_weights->loraA_weights[base_name] = loraA_data_copy;
+                lora_adapter_weights->loraB_weights[base_name] = loraB_data_copy;
+                lora_adapter_weights->lora_metadata_map[base_name] = lora_layer_metadata;
             }
 
             // we won't need these tensors again, reset the context to save memory
@@ -3242,6 +3299,10 @@ int llama_apply_lora_from_file_internal(struct llama_context * ctx, const char *
     ggml_free(lora_ctx);
     if (base_ctx) {
         ggml_free(base_ctx);
+    }
+
+    if (!deactivate_adapter) {
+        ctx->lora_cache[path_lora] = lora_adapter_weights;
     }
 
     const int64_t t_lora_us = ggml_time_us() - t_start_lora_us;
@@ -3268,20 +3329,21 @@ int llama_remove_lora_from_file(struct llama_context * ctx, const char * path_lo
     }
 }
 
-int llama_apply_lora_from_cache(struct llama_context * ctx, std::unordered_map<std::string, ggml_tensor*> lora_cache, const char * path_base_model, int n_threads) {
+int llama_apply_lora_from_cache(struct llama_context * ctx, const char * path_lora ,const char * path_base_model, int n_threads) {
     try {
-        return llama_apply_lora_from_cache_internal(ctx, lora_cache, path_base_model, n_threads, false);
+        return llama_apply_lora_from_cache_internal(ctx, path_lora, path_base_model, n_threads, false);
     } catch (const std::exception & err) {
-        fprintf(stderr, "%s: failed to apply lora adapter: %s\n", __func__, err.what());
+        fprintf(stderr, "%s: failed to apply cached lora adapter: %s\n", __func__, err.what());
         return 1;
     }
 }
 
-int llama_remove_lora_from_cache(struct llama_context * ctx, std::unordered_map<std::string, ggml_tensor*> lora_cache, const char * path_base_model, int n_threads) {
+
+int llama_remove_lora_from_cache(struct llama_context * ctx, const char * path_lora, const char * path_base_model, int n_threads) {
     try {
-        return llama_apply_lora_from_cache_internal(ctx, lora_cache, path_base_model, n_threads, true);
+        return llama_apply_lora_from_cache_internal(ctx, path_lora, path_base_model, n_threads, true);
     } catch (const std::exception & err) {
-        fprintf(stderr, "%s: failed to apply lora adapter: %s\n", __func__, err.what());
+        fprintf(stderr, "%s: failed to remove cached lora adapter: %s\n", __func__, err.what());
         return 1;
     }
 }
