@@ -934,7 +934,9 @@ void print_ggml_float_tensor(const struct ggml_tensor * tensor, std::string base
         for (int i = 0; i < num_elements_to_print; ++i) {
             fprintf(stderr, "%d : %f\n", i, ggml_fp16_to_fp32(((ggml_fp16_t*)data)[i]));
         }
-    } else { //Quantized data
+    } else {
+
+        //FIX ME: this doesn't work correctly
         // dequantised data
         dequantized_data = (float*)malloc(num_elements_to_print * sizeof(float));
 
@@ -2843,12 +2845,8 @@ int llama_model_quantize(
     }
 }
 
-int llama_swap_lora_from_cache_internal(struct llama_context * ctx, const char * path_lora_to_apply, const char * path_base_model, int n_threads, const char * path_lora_to_remove) {
-    int64_t t_lora_cache_us = ggml_time_us();
-
+int llama_swap_lora_from_cache_internal(struct llama_context * ctx, const char * path_lora_to_apply, int n_threads, const char * path_lora_to_remove) {
     auto & model = ctx->model;
-
-    //std::unordered_map<std::string, vector<float>> lora_tensors = cached_tensors.size() == 0 ? ctx->adapter_weights : cached_tensors;
 
     if (ctx->lora_cache.find(path_lora_to_apply) == ctx->lora_cache.end()) {
         fprintf(stderr, "%s: error: cached lora '%s' not found\n", __func__, path_lora_to_apply);
@@ -2890,9 +2888,7 @@ int llama_swap_lora_from_cache_internal(struct llama_context * ctx, const char *
     bool warned = false;
     int n_tensors = 0;
 
-    //TODO: Fix this to process loraA and loraB seperately
     for (auto it = model_tensors.begin(); it != model_tensors.end(); ++it) {
-        t_lora_cache_us = ggml_time_us();
         const std::string& base_name = it->first;
         ggml_tensor * dest_t = it->second;
 
@@ -2901,7 +2897,9 @@ int llama_swap_lora_from_cache_internal(struct llama_context * ctx, const char *
         ggml_tensor* BA_remove;
 
 
-        bool lora_found = false;
+        bool lora_to_apply_found = false;
+        bool lora_to_remove_found = false;
+
         // check if we have both A and B tensors and apply
         if (cached_lora_adapter_apply->loraA_weights.find(base_name) != cached_lora_adapter_apply->loraA_weights.end() ||
             cached_lora_adapter_apply->loraB_weights.find(base_name) != cached_lora_adapter_apply->loraB_weights.end()) {
@@ -2935,15 +2933,12 @@ int llama_swap_lora_from_cache_internal(struct llama_context * ctx, const char *
             // BA*s
             BA_apply = ggml_mul_mat(lora_ctx, loraA, loraB);
 
-            //print time taken till now
-            // fprintf(stderr, "time taken till matmul %s = %8.2f ms\n", base_name.c_str(), (ggml_time_us() - t_lora_cache_us)/1000.0);
-
             if (scaling != 1.0f) {
                 ggml_tensor * scale_tensor = ggml_new_f32(lora_ctx, scaling);
                 BA_apply = ggml_scale_inplace(lora_ctx, BA_apply, scale_tensor);
             }
 
-            lora_found = true;
+            lora_to_apply_found = true;
         }
 
         // check if we have both A and B tensors and remove
@@ -2979,43 +2974,24 @@ int llama_swap_lora_from_cache_internal(struct llama_context * ctx, const char *
             // BA*s
             BA_remove = ggml_mul_mat(lora_ctx, loraA, loraB);
 
-            //print time taken till now
-            // fprintf(stderr, "time taken till matmul %s = %8.2f ms\n", base_name.c_str(), (ggml_time_us() - t_lora_cache_us)/1000.0);
-
             scaling = -1.0f * scaling;
             if (scaling != 1.0f) {
                 ggml_tensor * scale_tensor = ggml_new_f32(lora_ctx, scaling);
                 BA_remove = ggml_scale_inplace(lora_ctx, BA_remove, scale_tensor);
             }
 
-            // BA_remove = ggml_neg(lora_ctx, BA_remove); // woould like to use inplace implementation but unfortunately its not exposed in ggml.h
-            lora_found = true;
+            lora_to_remove_found = true;
         }
 
         
-        if (!lora_found) {
-            // fprintf(stderr, "%s: error: No lora tensors found for layer '%s'\n", __func__, base_name.c_str());
+        if (!lora_to_apply_found && !lora_to_remove_found) {
             continue;
         }
 
-         //print time taken till now
-        // fprintf(stderr, "time taken till scaling %s = %8.2f ms\n", base_name.c_str(), (ggml_time_us() - t_lora_cache_us)/1000.0);
-        
-        // w = w - BAs to unload the model
-        // this has an obvious flaw that you need to pass exactly the same adapter weights with same layer names to unload the model
-        // obvious improvement would be just caching the weights on load and using them on unload
-
-        //print time taken till now
-        // fprintf(stderr, "time taken till neg %s = %8.2f ms\n", base_name.c_str(), (ggml_time_us() - t_lora_cache_us)/1000.0);
-
-        
-
-         //print time taken till now
-        // fprintf(stderr, "time taken till add inplace %s = %8.2f ms\n", base_name.c_str(), (ggml_time_us() - t_lora_cache_us)/1000.0);
         ggml_tensor* BA;
-        if (BA_apply && BA_remove) {
+        if (lora_to_apply_found && lora_to_remove_found) {
             BA = ggml_add(lora_ctx, BA_apply, BA_remove);
-        } else if (BA_apply) {
+        } else if (lora_to_apply_found) {
             BA = BA_apply;
         } else {
             BA = BA_remove;
@@ -3025,15 +3001,9 @@ int llama_swap_lora_from_cache_internal(struct llama_context * ctx, const char *
 
         struct ggml_cgraph gf = ggml_build_forward(r);
 
-         //print time taken till now
-        // fprintf(stderr, "time taken till graph build forward %s = %8.2f ms\n", base_name.c_str(), (ggml_time_us() - t_lora_cache_us)/1000.0);
-
         gf.n_threads = n_threads;
         ggml_graph_compute(lora_ctx, &gf);
 
-         //print time taken till now
-        // fprintf(stderr, "time taken till graph compute %s = %8.2f ms\n", base_name.c_str(), (ggml_time_us() - t_lora_cache_us)/1000.0);
-    
         // we won't need these tensors again, reset the context to save memory
         ggml_free(lora_ctx);
         lora_ctx = ggml_init(params);
@@ -3042,14 +3012,6 @@ int llama_swap_lora_from_cache_internal(struct llama_context * ctx, const char *
         if (n_tensors % 4 == 0) {
             fprintf(stderr, ".");
         }
-
-        if (base_name == "layers.0.attention.wk.weight") {
-            // print_tensor(r);
-            print_ggml_float_tensor(dest_t, "TEST", "TEST", 10);
-        }
-
-        //print time taken till now
-        // fprintf(stderr, "time taken to process cached layer %s = %8.2f ms\n", base_name.c_str(), (ggml_time_us() - t_lora_cache_us)/1000.0);
     }
 
     // TODO: this should be in a destructor, it will leak on failure
@@ -3061,7 +3023,6 @@ int llama_swap_lora_from_cache_internal(struct llama_context * ctx, const char *
 
     ctx->loaded_loras[path_lora_to_apply] = true;
 
-    //TODO: Decide if I want to clear up the lora cache or not
 
     const int64_t t_lora_us = ggml_time_us() - t_start_lora_us;
     fprintf(stderr, " done (%.2f ms)\n", t_lora_us / 1000.0);
@@ -3069,19 +3030,15 @@ int llama_swap_lora_from_cache_internal(struct llama_context * ctx, const char *
     return 0;
 }
 
-// Set `remove_existing` to true if you want to remove the adapter from the model.
-int llama_apply_lora_from_cache_internal(struct llama_context * ctx, const char * path_lora, const char * path_base_model, int n_threads, const bool remove_existing) {
-    int64_t t_lora_cache_us = ggml_time_us();
-
-    if (remove_existing) {
+// Set `is_delete` to true if you want to remove the adapter from the model.
+int llama_apply_lora_from_cache_internal(struct llama_context * ctx, const char * path_lora, const char * path_base_model, int n_threads, const bool is_delete) {
+    if (is_delete) {
         fprintf(stderr, "%s: deactivating lora adapter from cache - please wait ...\n", __func__);
     } else {
         fprintf(stderr, "%s: applying lora adapter from cache - please wait ...\n", __func__);
     }
 
     auto & model = ctx->model;
-
-    //std::unordered_map<std::string, vector<float>> lora_tensors = cached_tensors.size() == 0 ? ctx->adapter_weights : cached_tensors;
 
     if (ctx->lora_cache.find(path_lora) == ctx->lora_cache.end()) {
         fprintf(stderr, "%s: error: cached lora '%s' not found\n", __func__, path_lora);
@@ -3107,9 +3064,6 @@ int llama_apply_lora_from_cache_internal(struct llama_context * ctx, const char 
     for (auto & kv: model.tensors_by_name) {
         model_tensors.insert(kv);
     }
-
-    //print time taken till now
-    //fprintf(stderr, "%s: time taken till copying base model weights = %8.2f ms\n", __func__, (ggml_time_us() - t_lora_cache_us)/1000.0);
 
     // load base model
     std::unique_ptr<llama_model_loader> model_loader;
@@ -3147,7 +3101,6 @@ int llama_apply_lora_from_cache_internal(struct llama_context * ctx, const char 
 
     //TODO: Fix this to process loraA and loraB seperately
     for (auto it = cached_lora_adapter->lora_metadata_map.begin(); it != cached_lora_adapter->lora_metadata_map.end(); ++it) {
-        t_lora_cache_us = ggml_time_us();
         const std::string& base_name = it->first;
         const lora_metadata* metadata = it->second;
         std::vector<float> loraA_vec = cached_lora_adapter->loraA_weights[base_name];
@@ -3197,26 +3150,17 @@ int llama_apply_lora_from_cache_internal(struct llama_context * ctx, const char 
         // BA*s
         ggml_tensor * BA = ggml_mul_mat(lora_ctx, loraA, loraB);
 
-         //print time taken till now
-        // fprintf(stderr, "time taken till matmul %s = %8.2f ms\n", base_name.c_str(), (ggml_time_us() - t_lora_cache_us)/1000.0);
+        // w = w - BAs to unload the model
+        // this has an obvious flaw that you need to pass exactly the same adapter weights with same layer names to unload the model
+        // obvious improvement would be just caching the weights on load and using them on unload
+        if (is_delete) {
+            scaling = -1.0f * scaling;
+        }
 
         if (scaling != 1.0f) {
             ggml_tensor * scale_tensor = ggml_new_f32(lora_ctx, scaling);
             BA = ggml_scale_inplace(lora_ctx, BA, scale_tensor);
         }
-
-         //print time taken till now
-        // fprintf(stderr, "time taken till scaling %s = %8.2f ms\n", base_name.c_str(), (ggml_time_us() - t_lora_cache_us)/1000.0);
-        
-        // w = w - BAs to unload the model
-        // this has an obvious flaw that you need to pass exactly the same adapter weights with same layer names to unload the model
-        // obvious improvement would be just caching the weights on load and using them on unload
-        if (remove_existing) {
-            BA = ggml_neg(lora_ctx, BA); // woould like to use inplace implementation but unfortunately its not exposed in ggml.h
-        }
-
-        //print time taken till now
-        // fprintf(stderr, "time taken till neg %s = %8.2f ms\n", base_name.c_str(), (ggml_time_us() - t_lora_cache_us)/1000.0);
 
         ggml_tensor * r;
         if (base_t == dest_t) {
@@ -3227,20 +3171,11 @@ int llama_apply_lora_from_cache_internal(struct llama_context * ctx, const char 
             r = ggml_cpy(lora_ctx, r, dest_t);
         }
 
-         //print time taken till now
-        // fprintf(stderr, "time taken till add inplace %s = %8.2f ms\n", base_name.c_str(), (ggml_time_us() - t_lora_cache_us)/1000.0);
-
         struct ggml_cgraph gf = ggml_build_forward(r);
-
-         //print time taken till now
-        // fprintf(stderr, "time taken till graph build forward %s = %8.2f ms\n", base_name.c_str(), (ggml_time_us() - t_lora_cache_us)/1000.0);
 
         gf.n_threads = n_threads;
         ggml_graph_compute(lora_ctx, &gf);
 
-         //print time taken till now
-        // fprintf(stderr, "time taken till graph compute %s = %8.2f ms\n", base_name.c_str(), (ggml_time_us() - t_lora_cache_us)/1000.0);
-    
         // we won't need these tensors again, reset the context to save memory
         ggml_free(lora_ctx);
         lora_ctx = ggml_init(params);
@@ -3249,9 +3184,6 @@ int llama_apply_lora_from_cache_internal(struct llama_context * ctx, const char 
         if (n_tensors % 4 == 0) {
             fprintf(stderr, ".");
         }
-
-        //print time taken till now
-        // fprintf(stderr, "time taken to process cached layer %s = %8.2f ms\n", base_name.c_str(), (ggml_time_us() - t_lora_cache_us)/1000.0);
     }
 
     // TODO: this should be in a destructor, it will leak on failure
@@ -3260,13 +3192,12 @@ int llama_apply_lora_from_cache_internal(struct llama_context * ctx, const char 
         ggml_free(base_ctx);
     }
 
-    if (remove_existing) {
+    if (is_delete) {
         ctx->loaded_loras.erase(path_lora);
     } else {
         ctx->loaded_loras[path_lora] = true;
     }
 
-    //TODO: Decide if I want to clear up the lora cache or not
 
     const int64_t t_lora_us = ggml_time_us() - t_start_lora_us;
     fprintf(stderr, " done (%.2f ms)\n", t_lora_us / 1000.0);
@@ -3275,9 +3206,9 @@ int llama_apply_lora_from_cache_internal(struct llama_context * ctx, const char 
 }
 
 
-// Set `remove_existing` to true if you want to remove the adapter from the model.
-int llama_apply_lora_from_file_internal(struct llama_context * ctx, const char * path_lora, const char * path_base_model, int n_threads, const bool remove_existing) {
-    if (remove_existing) {
+// Set `is_delete` to true if you want to remove the adapter from the model.
+int llama_apply_lora_from_file_internal(struct llama_context * ctx, const char * path_lora, const char * path_base_model, int n_threads, const bool is_delete) {
+    if (is_delete) {
         fprintf(stderr, "%s: deactivating lora adapter - please wait ...\n", __func__);
     } else {
         fprintf(stderr, "%s: applying lora adapter from '%s' - please wait ...\n", __func__, path_lora);
@@ -3489,16 +3420,16 @@ int llama_apply_lora_from_file_internal(struct llama_context * ctx, const char *
             // BA*s
             ggml_tensor * BA = ggml_mul_mat(lora_ctx, loraA, loraB);
 
-            if (scaling != 1.0f) {
-                ggml_tensor * scale_tensor = ggml_new_f32(lora_ctx, scaling);
-                BA = ggml_scale_inplace(lora_ctx, BA, scale_tensor);
-            }
-
             // w = w - BAs to unload the model
             // this has an obvious flaw that you need to pass exactly the same adapter weights with same layer names to unload the model
             // obvious improvement would be just caching the weights on load and using them on unload
-            if (remove_existing) {
+            if (is_delete) {
                 BA = ggml_neg(lora_ctx, BA); // woould like to use inplace implementation but unfortunately its not exposed in ggml.h
+            }
+
+            if (scaling != 1.0f) {
+                ggml_tensor * scale_tensor = ggml_new_f32(lora_ctx, scaling);
+                BA = ggml_scale_inplace(lora_ctx, BA, scale_tensor);
             }
 
             ggml_tensor * r;
@@ -3514,7 +3445,7 @@ int llama_apply_lora_from_file_internal(struct llama_context * ctx, const char *
             gf.n_threads = n_threads;
             ggml_graph_compute(lora_ctx, &gf);
 
-            if (!remove_existing) {
+            if (!is_delete) {
                 // The copying poses a runtime cost though, might need to find a faster way to do this, some kind of cache warmup at the time of process restart
                 
                 float* loraA_data = (float *) loraA->data; // can do this cause lora is guaranteed to be F32 for now
@@ -3551,7 +3482,7 @@ int llama_apply_lora_from_file_internal(struct llama_context * ctx, const char *
         ggml_free(base_ctx);
     }
 
-    if (remove_existing) {
+    if (is_delete) {
         ctx->loaded_loras.erase(path_lora);
     } else {
         ctx->loaded_loras[path_lora] = true;
@@ -3601,9 +3532,9 @@ int llama_remove_lora_from_cache(struct llama_context * ctx, const char * path_l
     }
 }
 
-int llama_swap_lora_from_cache(struct llama_context * ctx, const char * path_lora_to_apply, const char * path_base_model, int n_threads, const char * path_lora_to_remove) {
+int llama_swap_lora_from_cache(struct llama_context * ctx, const char * path_lora_to_apply, int n_threads, const char * path_lora_to_remove) {
     try {
-        return llama_swap_lora_from_cache_internal(ctx, path_lora_to_apply, path_base_model, n_threads, path_lora_to_remove);
+        return llama_swap_lora_from_cache_internal(ctx, path_lora_to_apply, n_threads, path_lora_to_remove);
     } catch (const std::exception & err) {
         fprintf(stderr, "%s: failed to remove cached lora adapter: %s\n", __func__, err.what());
         return 1;
