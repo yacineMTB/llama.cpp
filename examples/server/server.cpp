@@ -2,8 +2,7 @@
 #include "llama.h"
 #include "build-info.h"
 
-// single thread
-#define CPPHTTPLIB_THREAD_POOL_COUNT 1
+#define CPPHTTPLIB_THREAD_POOL_COUNT 2
 #ifndef NDEBUG
 // crash the server in debug mode, otherwise send an http 500 error
 #define CPPHTTPLIB_NO_EXCEPTIONS 1
@@ -122,6 +121,7 @@ struct llama_server_context {
     bool stopped_eos = false;
     bool stopped_word = false;
     bool stopped_limit = false;
+    bool stopped_req = false;
     std::string stopping_word;
     int32_t multibyte_pending = 0;
 
@@ -141,6 +141,7 @@ struct llama_server_context {
         stopped_eos = false;
         stopped_word = false;
         stopped_limit = false;
+        stopped_req = false;
         stopping_word = "";
         multibyte_pending = 0;
 
@@ -214,6 +215,10 @@ struct llama_server_context {
         // number of tokens to keep when resetting context
         n_remain = params.n_predict;
         llama_set_rng_seed(ctx, params.seed);
+    }
+
+    void stopCompletion() {
+        stopped_req = true;
     }
 
     llama_token nextToken() {
@@ -812,6 +817,10 @@ int main(int argc, char ** argv) {
         res.set_content("<h1>llama.cpp server works</h1>", "text/html");
     });
 
+    svr.Post("/interrupt", [&llama](const Request & req, Response & res) {
+        llama.stopCompletion();
+    });
+
     svr.Post("/completion", [&llama](const Request & req, Response & res) {
         llama.rewind();
         llama_reset_timings(llama.ctx);
@@ -849,7 +858,7 @@ int main(int argc, char ** argv) {
             const auto chunked_content_provider = [&](size_t, DataSink & sink) {
                 size_t sent_count = 0;
 
-                while (llama.has_next_token) {
+                while (llama.has_next_token && !llama.stopped_req) {
                     const std::string token_text = llama.doCompletion();
                     if (llama.multibyte_pending > 0) {
                         continue;
